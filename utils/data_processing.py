@@ -1,9 +1,13 @@
 import bs4
-from langchain_community.document_loaders import WebBaseLoader
+# from langchain_community.document_loaders import WebBaseLoader
+from langchain_community.document_loaders.csv_loader import CSVLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from typing import List
 
+from utils.debug import log_time
+
+@log_time
 def load_documents() -> List[str]:
 	"""
 	Load documents for processing.
@@ -11,16 +15,17 @@ def load_documents() -> List[str]:
 	Returns:
 	- List[str]: A list of loaded document texts.
 	"""
-	loader = WebBaseLoader(
-		web_paths=("https://lilianweng.github.io/posts/2023-06-23-agent/",),
-		bs_kwargs=dict(
-			parse_only=bs4.SoupStrainer(
-				class_=("post-content", "post-title", "post-header")
-			)
-		),
+	loader = CSVLoader(
+		file_path="./mashqa_merged_output_all.csv",
+		csv_args={
+			"delimiter": ",",
+			"quotechar": '"',
+			"fieldnames": ["Q", "A"],
+		},
 	)
 	return loader.load()
 
+@log_time
 def split_documents(docs: List[str]) -> List[str]:
 	"""
 	Split the given documents into smaller chunks.

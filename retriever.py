@@ -1,57 +1,123 @@
 import os
+import pickle
 
-from langchain import chains
+from langchain_core.retrievers import BaseRetriever
+from langchain_core.tools import BaseTool
+from langchain.chains.combine_documents.base import BaseCombineDocumentsChain
+from langchain_core.prompts.base import BasePromptTemplate
+from langchain_huggingface import HuggingFaceEmbeddings
+
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.tools.retriever import create_retriever_tool
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_community.vectorstores import FAISS
-from langchain_core.retrievers import BaseRetriever
-from langchain_huggingface import HuggingFaceEmbeddings
 
 from utils.data_processing import load_documents, split_documents
+from utils.debug import log_time
 
-def create_history_aware_retriever(
-	llm: ChatOpenAI, 
+@log_time
+def create_qa_chain(
+	llm: ChatOpenAI,
 	retriever: BaseRetriever
-) -> BaseRetriever:
+) -> BaseCombineDocumentsChain:
 	"""
-	Create a history-aware retriever that reformulates questions based on chat history.
+	Create a question-answering (QA) chain using the given language model and retriever.
 
 	Parameters:
-	- llm (ChatOpenAI): The language model used for question reformulation.
-	- retriever (BaseRetriever): The retriever instance used to fetch relevant documents.
+	- llm (ChatOpenRouter): The language model used for generating answers.
+	- retriever (BaseRetriever): The retriever instance used to fetch relevant context.
 
 	Returns:
-	- BaseRetriever: A history-aware retriever instance that reformulates questions based on the given chat history.
+	- CombineDocumentsChain: A chain that uses the language model and retrieved context to answer questions concisely.
 	"""
-	contextualise_q_system_prompt = (
-		"Given a chat history and the latest user question "
-		"which might reference context in the chat history, "
-		"formulate a standalone question which can be understood "
-		"without the chat history. Do NOT answer the question, "
-		"just reformulate it if needed and otherwise return it as is."
+	system_prompt = (
+		"You are an assistant for question-answering tasks. "
+		"Use the following pieces of retrieved context to answer "
+		"the question. If you don't know the answer, say that you "
+		"don't know. Use three sentences maximum and keep the "
+		"answer concise."
+		"\n\n"
+		"{context}"
 	)
-	contextualise_q_prompt = ChatPromptTemplate.from_messages(
+
+	qa_prompt = ChatPromptTemplate.from_messages(
 		[
-			("system", contextualise_q_system_prompt),
+			("system", system_prompt),
 			MessagesPlaceholder("chat_history"),
 			("human", "{input}"),
 		]
 	)
-	return chains.create_history_aware_retriever(llm, retriever, contextualise_q_prompt)
 
-def create_embedding_function() -> HuggingFaceEmbeddings:
+	return create_stuff_documents_chain(llm, qa_prompt)
+
+@log_time
+def create_qa_tool(retriever: BaseRetriever) -> BaseTool:
 	"""
-	Create the embedding function used with the FAISS index.
+	Create a question-answering (QA) tool using to get context 
+	close to the given input either by the user or the agent.
+
+	Parameters:
+	- retriever (BaseRetriever): The retriever instance used to fetch relevant context.
 
 	Returns:
-	- HuggingFaceEmbeddings: The embedding function instance.
+	- BaseTool: A tool to be used by langchain agent to get relevant context.
 	"""
-	return HuggingFaceEmbeddings(
-		model_name="sentence-transformers/all-MiniLM-L6-v2",
-		model_kwargs={'device': 'cpu'},
-		encode_kwargs={'normalize_embeddings': False},
+
+	tool_rag_desc = (
+		"Searches and returns data from RAG. "
+		"The output of this tool will be in a format Q and A."
+		"Q stands for standard questions being ask and A stands"
+		"for correct answer for the question. Alaways have "
+		"an observation after getting the output of this tool."
 	)
 
+	tool_rag = create_retriever_tool(
+		retriever=retriever,
+		name="search_rag",
+		description=tool_rag_desc,
+	)
+
+	return tool_rag
+
+@log_time
+def create_prompt_react_agent() -> BasePromptTemplate:
+	"""
+	Create a prompt for ReAct agent based of hwchase17/react
+	"""
+
+	system_prompt = (
+		"You are an assistant for question-answering tasks. "
+		"Use the following pieces of retrieved context to answer "
+		"the question. If you don't know the answer, say that you "
+		"don't know. Use three sentences maximum and keep the "
+		"answer concise. You have access to the following tools:"
+		""
+		"{tools}"
+		""
+		"Use the following format:"
+		""
+		"Question: the input question you must answer"
+		"Thought: you should always think about what to do"
+		"Action: the action to take, should be one of [{tool_names}]"
+		"Action Input: the input to the action"
+		"Observation: the result of the action"
+		"... (this Thought/Action/Action Input/Observation can repeat N times)"
+		"Thought: I now know the final answer"
+		"Final Answer: the final answer to the original input question"
+		""
+		"N is maximum to be 5"
+		""
+		"Begin!"
+		""
+		"Question: {input}"
+		"Thought:{agent_scratchpad}"
+	)
+
+	return ChatPromptTemplate.from_template(system_prompt)
+	
+
+@log_time
 def create_or_load_vectorstore(
 	embedding_function: HuggingFaceEmbeddings,
 	index_path: str = 'faiss_index'
@@ -70,8 +136,11 @@ def create_or_load_vectorstore(
 	if os.path.exists(index_path):
 		vectorstore = FAISS.load_local(index_path, embedding_function, allow_dangerous_deserialization=True)
 	else:
+		print("Loading Docs")
 		docs = load_documents()
+		print("Spliting Docs")
 		splits = split_documents(docs)
+		print("Building vectorstore")
 		vectorstore = FAISS.from_documents(splits, embedding_function)
 		vectorstore.save_local(index_path)
 	return vectorstore
