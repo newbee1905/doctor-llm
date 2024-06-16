@@ -5,12 +5,13 @@ from langchain.agents import AgentExecutor, create_react_agent
 from langchain.memory import ConversationBufferMemory
 
 from utils.data_processing import load_documents, split_documents
-from utils.retriever import create_embedding_function
 from utils.history import get_session_history
 from utils.debug import log_time
+from utils.streamlit_cache import get_retriever, get_llm
 
 from openrouter import ChatOpenRouter
-from retriever import create_or_load_vectorstore, create_qa_chain, create_qa_tool, create_prompt_react_agent
+from runpod import ChatRunpod
+from retriever import create_qa_chain, create_qa_tool, create_prompt_react_agent
 from chain_history import create_history_aware_retriever
 
 import streamlit as st
@@ -31,9 +32,17 @@ parser = argparse.ArgumentParser(
 )
 
 parser.add_argument(
+	"-l", "--llm",
+	type=str,
+	default="openrouter",
+	choices=["runpod", "openrouter"],
+	help="Chose what provider of the LLM the program will use",
+)
+
+parser.add_argument(
 	"-m", "--model",
 	type=str,
-	default="microsoft/phi-3-mini-128k-instruct:free",
+	default="openchat/openchat-7b:free",
 	help="Chose what model from operrouter the program will use",
 )
 
@@ -44,77 +53,60 @@ parser.add_argument(
 
 args = parser.parse_args()
 
-llm = ChatOpenRouter(
-	model_name=args.model,
-	temperature=0,
-)
-
-embedding_function = create_embedding_function()
-vectorstore = create_or_load_vectorstore(embedding_function)
-
-retriever = vectorstore.as_retriever()
-
 ctx = get_script_run_ctx()
 user_session = ctx.session_id
+
+runpod_model_name = os.getenv("RUNPOD_MODEL_NAME")
+
+if args.llm == "runpod":
+	# I am hosting runpod with serverless, so it will
+	# only have one model option, which will be set in
+	# the dotenv alongside with other info of Runpod
+	model_name = runpod_model_name
+else:
+	model_name = args.model
+
+retriever = get_retriever()
+
+llm = get_llm(args.llm, model_name, args.agent)
 
 st.title(f"Doctor LLM")
 
 if args.agent:
-	# Bind words for react
-	llm = llm.bind(stop=["\nFinal Answer"])
-
 	tool_rag = create_qa_tool(retriever)
 	tools = [tool_rag]
-
-	# prompt = hub.pull("hwchase17/react")
 	prompt = create_prompt_react_agent()
 
-	# Construct the ReAct agent
 	agent = create_react_agent(llm, tools, prompt)
 
-	# Create an agent executor by passing in the agent and tools
-	memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-
-	agent_executor = AgentExecutor(
+	runner = AgentExecutor(
 		agent=agent,
 		tools=tools,
-		memory=memory,
 		max_iterations=100,
 		verbose=DEBUG,
 		handle_parsing_errors=True,
 	)
-
-	runner = agent_executor
-
-	for message in memory.buffer_as_messages:
-		with st.chat_message(message.type):
-			st.markdown(message.content)
 else:
-	### Contextualize question ###
 	history_aware_retriever = create_history_aware_retriever(llm, retriever)
-
-	### Answer question ###
 	question_answer_chain = create_qa_chain(llm, retriever)
 
-	rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
+	runner = create_retrieval_chain(history_aware_retriever, question_answer_chain)
 
-	### Statefully manage chat history ###
-	if "messages" not in st.session_state:
-		st.session_state.messages = {}
+### Statefully manage chat history ###
+if "messages" not in st.session_state:
+	st.session_state.messages = {}
 
-	conversational_rag_chain = RunnableWithMessageHistory(
-		rag_chain,
-		get_session_history,
-		input_messages_key="input",
-		history_messages_key="chat_history",
-		output_messages_key="answer",
-	)
+runner_with_history = RunnableWithMessageHistory(
+	runner,
+	get_session_history,
+	input_messages_key="input",
+	history_messages_key="chat_history",
+	output_messages_key="answer",
+)
 
-	runner = conversational_rag_chain
-
-	for message in get_session_history(user_session).messages:
-		with st.chat_message(message.type):
-			st.markdown(message.content)
+for message in get_session_history(user_session).messages:
+	with st.chat_message(message.type):
+		st.markdown(message.content)
 
 def res_generator(stream):
 	for chunk in stream:
@@ -131,7 +123,8 @@ if user_inp := st.chat_input("Message..."):
 	}
 
 	with st.chat_message("ai"):
-		res = log_time(runner.invoke)(prompt_obj, config=config)
+		# res = log_time(runner.invoke)(prompt_obj, config=config)
+		res = runner_with_history.invoke(prompt_obj, config=config)
 		if args.agent:
 			st.markdown(res["output"])
 		else:

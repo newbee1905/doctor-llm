@@ -14,6 +14,7 @@ from utils.history import get_session_history
 from utils.debug import log_time
 
 from openrouter import ChatOpenRouter
+from runpod import ChatRunpod
 from retriever import create_qa_chain, create_or_load_vectorstore, create_prompt_react_agent
 from chain_history import create_history_aware_retriever
 
@@ -25,9 +26,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 llm = ChatOpenRouter(
-	# model_name="nousresearch/nous-capybara-7b:free"
-	model_name="microsoft/phi-3-mini-128k-instruct:free"
+	# model_name="nousresearch/nous-capybara-7b:free", 
+	# model_name="microsoft/phi-3-medium-128k-instruct:free",
+	model_name="meta-llama/llama-3-8b-instruct:free",
 )
+# runpod_model_name = os.getenv("RUNPOD_MODEL_NAME")
+
+# llm = ChatRunpod(
+# 	model_name=runpod_model_name,
+# )
 # Bind words for react
 llm = llm.bind(stop=["\nFinal Answer"])
 
@@ -69,7 +76,7 @@ agent_executor = AgentExecutor(
 )
 
 q1 = "Hi, I am a bit dizzy and feel tired, I can't sleep well at night."
-q2 = "Do I need any pills Doctor"
+q2 = "Give me a short list task to follow"
 
 chat_history = memory.buffer_as_messages
 a1 = agent_executor.invoke({
